@@ -1,0 +1,13 @@
+dependencies = '''
+flask
+flask-sqlalchemy
+flask-cors
+smtplib
+email
+random
+'''
+with open("requirements.txt", "w") as f:
+    f.write(dependencies)
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=True)
