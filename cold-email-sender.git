@@ -1,0 +1,135 @@
+# Backend: Flask API for Cold Email Sender
+
+from flask import Flask, request, jsonify
+from flask_sqlalchemy import SQLAlchemy
+from flask_cors import CORS
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import random
+
+app = Flask(__name__)
+CORS(app)
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///emails.db'
+db = SQLAlchemy(app)
+
+# Database Model for SMTP Servers
+class SMTPServer(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), nullable=False)
+    smtp_host = db.Column(db.String(100), nullable=False)
+    smtp_port = db.Column(db.Integer, nullable=False)
+    username = db.Column(db.String(100), nullable=False)
+    password = db.Column(db.String(100), nullable=False)
+    use_tls = db.Column(db.Boolean, default=True)
+
+# Database Model for Email Campaigns
+class EmailCampaign(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    subject = db.Column(db.String(200), nullable=False)
+    body = db.Column(db.Text, nullable=False)
+    recipient_list = db.Column(db.Text, nullable=False)  # Comma-separated emails
+    smtp_id = db.Column(db.Integer, db.ForeignKey('smtp_server.id'), nullable=False)
+    status = db.Column(db.String(20), default='Pending')
+    opened = db.Column(db.Integer, default=0)
+    clicked = db.Column(db.Integer, default=0)
+
+# Initialize Database
+@app.before_first_request
+def create_tables():
+    db.create_all()
+
+# Route to Add SMTP Servers
+@app.route('/add_smtp', methods=['POST'])
+def add_smtp():
+    data = request.json
+    new_smtp = SMTPServer(
+        name=data['name'],
+        smtp_host=data['smtp_host'],
+        smtp_port=data['smtp_port'],
+        username=data['username'],
+        password=data['password'],
+        use_tls=data.get('use_tls', True)
+    )
+    db.session.add(new_smtp)
+    db.session.commit()
+    return jsonify({"message": "SMTP server added successfully!"})
+
+# Route to Create Email Campaign
+@app.route('/create_campaign', methods=['POST'])
+def create_campaign():
+    data = request.json
+    new_campaign = EmailCampaign(
+        subject=data['subject'],
+        body=data['body'],
+        recipient_list=','.join(data['recipients']),
+        smtp_id=data['smtp_id']
+    )
+    db.session.add(new_campaign)
+    db.session.commit()
+    return jsonify({"message": "Campaign created successfully!", "campaign_id": new_campaign.id})
+
+# Route to Send Emails
+@app.route('/send_email', methods=['POST'])
+def send_email():
+    data = request.json
+    campaign = EmailCampaign.query.get(data['campaign_id'])
+    if not campaign:
+        return jsonify({"error": "Campaign not found"}), 404
+
+    smtp_servers = SMTPServer.query.all()
+    if not smtp_servers:
+        return jsonify({"error": "No SMTP servers configured"}), 400
+
+    recipient_list = campaign.recipient_list.split(',')
+    
+    for recipient in recipient_list:
+        smtp = random.choice(smtp_servers)  # Rotate SMTP servers
+        try:
+            server = smtplib.SMTP(smtp.smtp_host, smtp.smtp_port)
+            if smtp.use_tls:
+                server.starttls()
+            server.login(smtp.username, smtp.password)
+            
+            msg = MIMEMultipart()
+            msg['From'] = smtp.username
+            msg['To'] = recipient
+            msg['Subject'] = campaign.subject
+            msg.attach(MIMEText(campaign.body, 'plain'))
+            
+            server.sendmail(smtp.username, recipient, msg.as_string())
+            server.quit()
+        except Exception as e:
+            return jsonify({"error": str(e)})
+    
+    campaign.status = "Sent"
+    db.session.commit()
+    return jsonify({"message": "Emails sent successfully!"})
+
+# Route to Track Campaign Stats
+@app.route('/campaign_stats', methods=['GET'])
+def campaign_stats():
+    campaigns = EmailCampaign.query.all()
+    stats = [{
+        "id": c.id,
+        "subject": c.subject,
+        "status": c.status,
+        "opened": c.opened,
+        "clicked": c.clicked
+    } for c in campaigns]
+    return jsonify(stats)
+
+# Dockerfile for Deployment
+dockerfile_content = '''
+FROM python:3.9
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+COPY . .
+CMD ["python", "app.py"]
+'''
+with open("Dockerfile", "w") as f:
+    f.write(dockerfile_content)
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=True)
